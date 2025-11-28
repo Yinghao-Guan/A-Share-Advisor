@@ -1,156 +1,176 @@
 import akshare as ak
+import baostock as bs
 import pandas as pd
 import datetime
 import re
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+import requests
 
 
 def sanitize_stock_code(code: str) -> str:
     """
-    清洗用户输入的股票代码，确保是 6 位数字字符串。
-    例如：输入 'sh600519' -> 输出 '600519'
+    清洗用户输入的股票代码。
+    返回由6位数字组成的字符串。
     """
-    # 提取字符串中的所有数字
     digits = re.findall(r'\d+', str(code))
     if digits:
-        # 拼接并取后6位（防止有些输入带前缀）
-        clean_code = "".join(digits)[-6:]
-        return clean_code
+        return "".join(digits)[-6:]
     return code
 
 
+def _get_ashare_data_primary(clean_symbol: str, period: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    【主引擎】使用 AkShare (东方财富源)
+    """
+    print(f"🔄 [Primary: AkShare] 尝试获取 {clean_symbol}...")
+
+    # AkShare 接口
+    df = ak.stock_zh_a_hist(
+        symbol=clean_symbol,
+        period=period,
+        start_date=start_date,
+        end_date=end_date,
+        adjust="qfq"
+    )
+
+    if df is None or df.empty:
+        raise ValueError("AkShare returned empty data")
+
+    # 清洗列名
+    rename_map = {
+        '日期': 'timestamp', '开盘': 'Open', '最高': 'High',
+        '最低': 'Low', '收盘': 'Close', '成交量': 'Volume'
+    }
+    df = df.rename(columns=rename_map)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    return df
+
+
+def _get_baostock_data_fallback(clean_symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    【备用引擎】使用 BaoStock
+    注意：BaoStock 需要特定的代码格式 (e.g., sh.600519) 且返回全是字符串
+    """
+    print(f"🛡️ [Fallback: BaoStock] 主源失败，正在切换备用源获取 {clean_symbol}...")
+
+    # 1. 登录系统
+    bs.login()
+
+    # 2. 格式化代码：BaoStock 需要 'sh.600519' 或 'sz.000001'
+    # 简单判断：6开头是沪市(sh)，0/3开头是深市(sz)，4/8是北交所(bj - baostock暂不支持bj)
+    if clean_symbol.startswith('6'):
+        bs_symbol = f"sh.{clean_symbol}"
+    elif clean_symbol.startswith(('0', '3')):
+        bs_symbol = f"sz.{clean_symbol}"
+    else:
+        bs.logout()
+        raise ValueError(f"BaoStock 可能不支持该代码前缀: {clean_symbol}")
+
+    # 3. 格式化日期：YYYYMMDD -> YYYY-MM-DD
+    bs_start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+    bs_end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+
+    # 4. 获取数据 (adjustflag="2" 前复权)
+    rs = bs.query_history_k_data_plus(
+        bs_symbol,
+        "date,open,high,low,close,volume",
+        start_date=bs_start, end_date=bs_end,
+        frequency="d", adjustflag="2"
+    )
+
+    data_list = []
+    while (rs.error_code == '0') & rs.next():
+        data_list.append(rs.get_row_data())
+
+    bs.logout()
+
+    if not data_list:
+        raise ValueError("BaoStock returned empty data")
+
+    # 5. 转 DataFrame
+    df = pd.DataFrame(data_list, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+
+    # 6. 类型清洗 (BaoStock 返回的都是字符串，必须转)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # 注意：BaoStock 有时候 Volume 是空字符串，需要处理
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    return df
+
+
+# --- 对外暴露的主函数 (带重试) ---
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+    retry=retry_if_exception_type((requests.exceptions.RequestException, ConnectionError, Exception))
+)
 def get_ashare_data(symbol: str, period: str = 'daily', limit_days: int = 365) -> pd.DataFrame:
     """
-    获取 A 股历史数据并清洗为标准格式。
-
-    :param symbol: 股票代码 (e.g., '600519')
-    :param period: 周期 ('daily', 'weekly', 'monthly')
-    :param limit_days: 回溯获取多少天的数据 (计算长周期指标如年线需要较多数据)
-    :return: 清洗好的 DataFrame，索引为日期，列为 Open, High, Low, Close, Volume
+    双引擎数据获取：优先 AkShare，失败则降级到 BaoStock。
     """
     clean_symbol = sanitize_stock_code(symbol)
-    print(f"🔄 [Data Fetcher] 正在获取 {clean_symbol} 的 {period} 数据 (过去 {limit_days} 天)...")
 
-    # 计算开始时间
+    # 计算时间
     end_date = datetime.datetime.now()
     start_date = end_date - datetime.timedelta(days=limit_days)
     start_date_str = start_date.strftime("%Y%m%d")
     end_date_str = end_date.strftime("%Y%m%d")
 
     try:
-        # 调用 AkShare 接口 (stock_zh_a_hist 是目前最稳定的 A 股历史行情接口)
-        # adjust='qfq' : 前复权，技术分析必须项
-        df = ak.stock_zh_a_hist(
-            symbol=clean_symbol,
-            period=period,
-            start_date=start_date_str,
-            end_date=end_date_str,
-            adjust="qfq"
-        )
-
-        if df is None or df.empty:
-            print(f"❌ [Data Fetcher] 未获取到数据，请检查股票代码 {clean_symbol} 是否正确。")
-            return None
-
-        # --- 数据清洗标准流程 ---
-
-        # 1. 重命名列 (适配 pandas_ta 需要的英文列名)
-        # AkShare 返回的列名通常是中文：'日期', '开盘', '收盘', '最高', '最低', '成交量', ...
-        rename_map = {
-            '日期': 'timestamp',
-            '开盘': 'Open',
-            '最高': 'High',
-            '最低': 'Low',
-            '收盘': 'Close',
-            '成交量': 'Volume'
-        }
-        df = df.rename(columns=rename_map)
-
-        # 2. 确保只保留核心列 (防止接口变动返回多余列干扰)
-        required_cols = ['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']
-        df = df[required_cols]
-
-        # 3. 类型转换 (确保全是数值，日期转 datetime)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-
-        # 将价格列转换为 float
-        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # 4. 设置索引
-        df = df.set_index('timestamp')
-        df = df.sort_index()  # 确保按时间正序排列
-
-        print(f"✅ [Data Fetcher] 成功获取 {len(df)} 条 K 线数据。")
-        print(f"   最新收盘价: {df.iloc[-1]['Close']} (日期: {df.index[-1].date()})")
-
-        return df
+        # 1. 尝试主引擎
+        df = _get_ashare_data_primary(clean_symbol, period, start_date_str, end_date_str)
 
     except Exception as e:
-        print(f"❌ [Data Fetcher] 发生异常: {e}")
-        return None
+        print(f"⚠️ [Data Fetcher] AkShare 异常: {e}")
+        try:
+            # 2. 尝试备用引擎 (BaoStock 仅支持日线，如果是周线月线可能需要额外处理，这里暂只处理日线)
+            if period == 'daily':
+                df = _get_baostock_data_fallback(clean_symbol, start_date_str, end_date_str)
+            else:
+                raise e  # 如果不是日线，BaoStock 处理起来比较麻烦，直接抛出
+        except Exception as e_backup:
+            print(f"❌ [Data Fetcher] 所有数据源均失败。最后错误: {e_backup}")
+            raise e_backup  # 抛出最后一次异常供 tenacity 重试或 app.py 捕获
+
+    # 通用清洗
+    df = df.set_index('timestamp').sort_index()
+    # 过滤掉成交量为0的停牌数据
+    df = df[df['Volume'] > 0]
+
+    print(f"✅ [Data Fetcher] 成功获取 {len(df)} 条数据。")
+    return df
 
 
+# --- 新闻获取保持不变，或者你可以直接保留之前的重试版本 ---
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def get_stock_news(symbol: str, limit: int = 5) -> str:
-    """
-    获取个股最近的新闻。
-    注意：akshare 的新闻接口依赖东方财富网页，极其容易因为源站改版而失效。
-    这里增加了强鲁棒性处理。
-    """
+    # ... (保持你之前的代码不变) ...
     clean_symbol = sanitize_stock_code(symbol)
-    print(f"📰 [Data Fetcher] 正在获取 {clean_symbol} 的新闻面数据...")
-
     try:
-        # 尝试调用主要接口
         news_df = ak.stock_news_em(symbol=clean_symbol)
-
-        # 检查数据是否为空
         if news_df is None or news_df.empty:
-            return "未获取到相关新闻 (Source Empty)。"
+            return "暂无新闻"
 
-        # 尝试标准解析
-        recent_news = news_df.head(limit)
-        news_summary_list = []
-        for _, row in recent_news.iterrows():
-            # 增加对列名存在的检查，防止列名变更导致 KeyError
-            date = str(row.get('发布时间', '未知日期'))[:10]
-            title = row.get('新闻标题', '无标题')
-            news_summary_list.append(f"- [{date}] {title}")
-
-        return "\n".join(news_summary_list)
-
-    except KeyError as e:
-        # 专门捕获你遇到的 'cmsArticle' 错误
-        print(f"⚠️ [Data Fetcher Warning] AkShare 解析失败 ({e})，可能是源站接口变动。")
-        return "新闻接口暂时不可用 (Source Structure Changed)。建议更新 akshare 或稍后再试。"
-    except Exception as e:
-        # 捕获网络或其他未知错误
-        print(f"❌ [Data Fetcher Error] {e}")
-        return f"新闻获取异常: {str(e)[:50]}..."
+        recent = news_df.head(limit)
+        news_list = []
+        for _, row in recent.iterrows():
+            d = str(row.get('发布时间', ''))[:10]
+            t = row.get('新闻标题', '')
+            news_list.append(f"- [{d}] {t}")
+        return "\n".join(news_list)
+    except Exception:
+        return "新闻接口暂时不可用"
 
 
+# get_stock_name 也可以保持不变 ...
 def get_stock_name(symbol: str) -> str:
-    """
-    获取股票名称，用于自选股列表展示。
-    """
+    # ... (保持不变) ...
     clean_symbol = sanitize_stock_code(symbol)
     try:
-        # 获取个股信息 (包含 股票简称, 上市日期, 总市值等)
-        info_df = ak.stock_individual_info_em(symbol=clean_symbol)
-
-        # 这个接口返回一个 DataFrame，列是 'item' 和 'value'
-        # 我们需要找到 value 对应的 item 是 '股票简称' 的那一行
-        # 通常它长这样：
-        #    item    value
-        # 0  股票代码  600519
-        # 1  股票简称  贵州茅台
-
-        name_row = info_df[info_df['item'] == '股票简称']
-        if not name_row.empty:
-            return name_row.iloc[0]['value']
-        else:
-            return clean_symbol  # 如果找不到名字，就返回代码代替
-
-    except Exception as e:
-        print(f"⚠️ [Data Fetcher] 获取股票名称失败: {e}")
-        return clean_symbol
+        info = ak.stock_individual_info_em(symbol=clean_symbol)
+        row = info[info['item'] == '股票简称']
+        if not row.empty: return row.iloc[0]['value']
+    except:
+        pass
+    return clean_symbol
