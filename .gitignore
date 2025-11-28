@@ -1,0 +1,90 @@
+# ===========================
+# 🔐 Security (CRITICAL)
+# ===========================
+# 忽略环境变量文件，防止 API Key 泄露
+.env
+.env.local
+secrets.toml
+
+# ===========================
+# 🐍 Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===========================
+# 📦 Virtual Environments
+# ===========================
+venv/
+.venv/
+env/
+.env/
+venv.bak/
+
+# ===========================
+# 💻 IDEs & Editors
+# ===========================
+# JetBrains (PyCharm)
+.idea/
+*.iml
+*.iws
+# VS Code
+.vscode/
+
+# ===========================
+# 🍎 macOS
+# ===========================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ===========================
+# 🪟 Windows
+# ===========================
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# ===========================
+# 🌊 Streamlit
+# ===========================
+.streamlit/secrets.toml
+# 如果你的图表缓存不需要提交
+.streamlit/cache/
+
+# ===========================
+# 📊 Logs & Databases
+# ===========================
+*.log
+*.sqlite
