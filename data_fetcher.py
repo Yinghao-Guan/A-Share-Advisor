@@ -91,16 +91,39 @@ def get_ashare_data(symbol: str, period: str = 'daily', limit_days: int = 365) -
         return None
 
 
-# ==========================================
-# 简单的测试运行
-# ==========================================
-if __name__ == "__main__":
-    # 测试用例 1: 贵州茅台 (600519)
-    print("--- 测试 1: 正常股票 ---")
-    df_result = get_ashare_data("600519", period="daily")
-    if df_result is not None:
-        print(df_result.tail())  # 打印最后 5 行看看格式
+def get_stock_news(symbol: str, limit: int = 5) -> str:
+    """
+    获取个股最近的新闻。
+    注意：akshare 的新闻接口依赖东方财富网页，极其容易因为源站改版而失效。
+    这里增加了强鲁棒性处理。
+    """
+    clean_symbol = sanitize_stock_code(symbol)
+    print(f"📰 [Data Fetcher] 正在获取 {clean_symbol} 的新闻面数据...")
 
-    # 测试用例 2: 容错测试 (带前缀的代码)
-    print("\n--- 测试 2: 输入带前缀的代码 ---")
-    get_ashare_data("sz000001")  # 平安银行
+    try:
+        # 尝试调用主要接口
+        news_df = ak.stock_news_em(symbol=clean_symbol)
+
+        # 检查数据是否为空
+        if news_df is None or news_df.empty:
+            return "未获取到相关新闻 (Source Empty)。"
+
+        # 尝试标准解析
+        recent_news = news_df.head(limit)
+        news_summary_list = []
+        for _, row in recent_news.iterrows():
+            # 增加对列名存在的检查，防止列名变更导致 KeyError
+            date = str(row.get('发布时间', '未知日期'))[:10]
+            title = row.get('新闻标题', '无标题')
+            news_summary_list.append(f"- [{date}] {title}")
+
+        return "\n".join(news_summary_list)
+
+    except KeyError as e:
+        # 专门捕获你遇到的 'cmsArticle' 错误
+        print(f"⚠️ [Data Fetcher Warning] AkShare 解析失败 ({e})，可能是源站接口变动。")
+        return "新闻接口暂时不可用 (Source Structure Changed)。建议更新 akshare 或稍后再试。"
+    except Exception as e:
+        # 捕获网络或其他未知错误
+        print(f"❌ [Data Fetcher Error] {e}")
+        return f"新闻获取异常: {str(e)[:50]}..."
