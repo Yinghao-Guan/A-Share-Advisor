@@ -163,7 +163,7 @@ def main():
                 with col_h1:
                     share_count = st.text_input("持有股数", placeholder="如 100")
                 with col_h2:
-                    avg_cost = st.text_input("持仓成本", placeholder="如 1500.5")
+                    avg_cost = st.text_input("持仓成本（单股）", placeholder="如 1500.5")
 
                 # 3. 动态拼装字符串供 LLM 使用
                 if share_count and avg_cost:
