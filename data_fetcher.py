@@ -127,3 +127,30 @@ def get_stock_news(symbol: str, limit: int = 5) -> str:
         # 捕获网络或其他未知错误
         print(f"❌ [Data Fetcher Error] {e}")
         return f"新闻获取异常: {str(e)[:50]}..."
+
+
+def get_stock_name(symbol: str) -> str:
+    """
+    获取股票名称，用于自选股列表展示。
+    """
+    clean_symbol = sanitize_stock_code(symbol)
+    try:
+        # 获取个股信息 (包含 股票简称, 上市日期, 总市值等)
+        info_df = ak.stock_individual_info_em(symbol=clean_symbol)
+
+        # 这个接口返回一个 DataFrame，列是 'item' 和 'value'
+        # 我们需要找到 value 对应的 item 是 '股票简称' 的那一行
+        # 通常它长这样：
+        #    item    value
+        # 0  股票代码  600519
+        # 1  股票简称  贵州茅台
+
+        name_row = info_df[info_df['item'] == '股票简称']
+        if not name_row.empty:
+            return name_row.iloc[0]['value']
+        else:
+            return clean_symbol  # 如果找不到名字，就返回代码代替
+
+    except Exception as e:
+        print(f"⚠️ [Data Fetcher] 获取股票名称失败: {e}")
+        return clean_symbol
